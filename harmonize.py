@@ -11,7 +11,7 @@ from skimage.exposure import match_histograms
 
 
 class ColorMLP(nn.Module):
-    def __init__(self, hidden=16, strength=0.35):
+    def __init__(self, hidden=32, strength=0.35):
         super().__init__()
         self.strength = strength
         self.net = nn.Sequential(
@@ -21,8 +21,6 @@ class ColorMLP(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden, 3),
         )
-
-        # start as identity: output = x
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
@@ -46,12 +44,9 @@ def project_orthogonal_(M):
     with torch.no_grad():
         U, _, Vt = torch.linalg.svd(M)
         R = U @ Vt
-
-        # prevent reflection
         if torch.det(R) < 0:
             U[:, -1] *= -1
             R = U @ Vt
-
         M.copy_(R)
 
 
@@ -61,13 +56,13 @@ def harmonize(
     iterations=1000,
     max_pixels=200_000,
     mapping="ortho",
+    hist=False,
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     img1 = load_image(ref_path)
     img2 = load_image(tar_path)
 
-    # Resize reference to target, as in your current code
     img1 = resize_to_ref(img1, img2)
 
     A = torch.tensor(img1, dtype=torch.float32, device=device)
@@ -92,7 +87,7 @@ def harmonize(
         M = nn.Parameter(torch.eye(3, device=device))
         opt = optim.Adam([M], lr=1e-2)
 
-        for _ in tqdm(range(iterations), desc=f"Optimizing {mapping} color transform"):
+        for _ in tqdm(range(iterations), desc=f"Optimizing {mapping} transform"):
             opt.zero_grad()
 
             pred = B_pix @ M
@@ -122,16 +117,15 @@ def harmonize(
         model = ColorMLP(hidden=32, strength=0.35).to(device)
         opt = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
-        for _ in tqdm(range(iterations), desc="Optimizing MLP color transform"):
+        for _ in tqdm(range(iterations), desc="Optimizing MLP transform"):
             opt.zero_grad()
 
             pred = model(B_pix)
-
             loss = torch.sqrt(((pred - A_pix) ** 2).mean())
 
             range_penalty = (
-                torch.relu(-pred).pow(2).mean() +
-                torch.relu(pred - 1).pow(2).mean()
+                torch.relu(-pred).pow(2).mean()
+                + torch.relu(pred - 1).pow(2).mean()
             )
 
             total = loss + 0.1 * range_penalty
@@ -146,35 +140,27 @@ def harmonize(
     else:
         raise ValueError(f"Unknown mapping: {mapping}")
 
-    img2_post_hist = match_histograms(img2_post, img1, channel_axis=-1)
-    img2_post_hist = np.clip(img2_post_hist, 0, 1)
+    if hist==1:
+        img2_post = match_histograms(img2_post, img1, channel_axis=-1)
+        img2_post = np.clip(img2_post, 0, 1)
 
     out_base = os.path.splitext(tar_path)[0]
-    out_path = f"{out_base}_harmonized_{mapping}.png"
-    out_hist_path = f"{out_base}_harmonized_{mapping}_hist.png"
+    hist_suffix = "_hist" if hist else ""
+    out_path = f"{out_base}_harmonized_{mapping}{hist_suffix}.png"
 
     Image.fromarray((img2_post * 255).astype(np.uint8)).save(out_path)
-    Image.fromarray((img2_post_hist * 255).astype(np.uint8)).save(out_hist_path)
-  
-    else:
-        img1_show = img1
-        img2_show = img2
-        img2_post_show = img2_post
-        img2_post_hist_show = img2_post_hist
+    print(f"Saved: {out_path}")
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    axes[0].imshow(img1_show)
+    axes[0].imshow(img1)
     axes[0].set_title("reference")
 
-    axes[1].imshow(img2_show)
+    axes[1].imshow(img2)
     axes[1].set_title("target pre")
 
-    axes[2].imshow(img2_post_show)
-    axes[2].set_title(f"target post ({mapping})")
-
-    axes[3].imshow(img2_post_hist_show)
-    axes[3].set_title("target post + hist")
+    axes[2].imshow(img2_post)
+    axes[2].set_title(f"target post ({mapping}{' + hist' if hist else ''})")
 
     for ax in axes:
         ax.axis("off")
@@ -196,6 +182,12 @@ def main():
         default="ortho",
         help="color mapping type",
     )
+    parser.add_argument(
+        "-hist",
+        type=int,
+        default=1,
+        help="apply histogram matching (1=on, 0=off, default=1)",
+    )
 
     args = parser.parse_args()
 
@@ -204,6 +196,7 @@ def main():
         tar_path=args.tar,
         iterations=args.ite,
         mapping=args.mapping,
+        hist=args.hist,
     )
 
 
